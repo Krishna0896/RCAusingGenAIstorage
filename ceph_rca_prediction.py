@@ -1,158 +1,160 @@
 import os
 import requests
+import json
 from datetime import datetime
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import inch
 
-# -------------------------------
-# CONFIG
-# -------------------------------
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "REPLACE_WITH_YOUR_GROQ_KEY")
-GROQ_MODEL = "llama3-70b-8192"
+# ===============================
+# CONFIGURATION
+# ===============================
+PROMETHEUS_URL = "http://localhost:9095"
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")   # 🔐 SAFE
+PDF_REPORT = "Ceph_RCA_Final_Report.pdf"
 
-PDF_OUTPUT = "Ceph_RCA_Final_Report.pdf"
+if not GROQ_API_KEY:
+    raise EnvironmentError("❌ GROQ_API_KEY environment variable not set")
 
-# -------------------------------
+# ===============================
 # STEP 1: COLLECT METRICS
-# (Replace with real Prometheus queries later)
-# -------------------------------
+# ===============================
+def query_prometheus(query):
+    url = f"{PROMETHEUS_URL}/api/v1/query"
+    r = requests.get(url, params={"query": query}, timeout=10)
+    r.raise_for_status()
+    return r.json()["data"]["result"]
+
 def collect_ceph_metrics():
-    """
-    Mocked metrics based on your real cluster output.
-    Replace this with Prometheus API calls later.
-    """
-    return {
-        "cluster_health": "HEALTH_WARN",
-        "osd_up": 0,
-        "osd_total": 1,
-        "pgs_degraded": 10,
-        "pgs_undersized": 80,
-        "objects_degraded_pct": 50,
-        "disk_used_gb": 0.29,
-        "disk_total_gb": 100,
-        "mon_quorum": True,
-        "timestamp": datetime.now().isoformat()
+    print("[1] Collecting Ceph metrics from Prometheus...")
+
+    metrics = {
+        "cluster_health": query_prometheus("ceph_health_status"),
+        "osd_up": query_prometheus("ceph_osd_up"),
+        "pg_degraded": query_prometheus("ceph_pg_degraded"),
+        "pg_undersized": query_prometheus("ceph_pg_undersized"),
+        "mon_quorum": query_prometheus("ceph_mon_quorum_status")
     }
 
-# -------------------------------
-# STEP 2: GROQ RCA GENERATION
-# -------------------------------
-def generate_rca_with_groq(metrics):
-    prompt = f"""
-You are a senior Ceph Storage SRE.
+    return json.dumps(metrics, indent=2)
 
-Analyze the following Ceph cluster metrics and generate a Root Cause Analysis.
+# ===============================
+# STEP 2: GROQ RCA GENERATION
+# ===============================
+def generate_rca_with_groq(metrics):
+    print("[2] Generating RCA using Groq LLM...")
+
+    prompt = f"""
+You are a Ceph Storage Reliability Engineer.
+
+Analyze the following Ceph cluster metrics and generate:
+1. Root Cause Analysis
+2. Impact
+3. Immediate Remediation
+4. Long-term Preventive Actions
 
 Metrics:
-- Cluster Health: {metrics['cluster_health']}
-- OSDs Up: {metrics['osd_up']} / {metrics['osd_total']}
-- PGs Degraded: {metrics['pgs_degraded']}
-- PGs Undersized: {metrics['pgs_undersized']}
-- Degraded Objects (%): {metrics['objects_degraded_pct']}
-- Disk Usage: {metrics['disk_used_gb']}GB / {metrics['disk_total_gb']}GB
-- MON Quorum: {metrics['mon_quorum']}
-
-Provide:
-1. Root Cause
-2. Contributing Factors
-3. Impact
-4. Immediate Remediation
-5. Long-term Prevention
+{metrics}
 """
+
+    payload = {
+        "model": "llama3-70b-8192",
+        "messages": [
+            {"role": "system", "content": "You are an expert Ceph SRE."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.3
+    }
+
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
 
     response = requests.post(
         "https://api.groq.com/openai/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": GROQ_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.2,
-        },
-        timeout=60
+        headers=headers,
+        json=payload,
+        timeout=30
     )
 
-    return response.json()["choices"][0]["message"]["content"]
+    data = response.json()
 
-# -------------------------------
+    if "choices" in data:
+        return data["choices"][0]["message"]["content"]
+
+    raise Exception(f"Unexpected Groq response: {data}")
+
+# ===============================
 # STEP 3: FAILURE PREDICTION
-# -------------------------------
-def predict_failure(metrics):
-    if metrics["osd_up"] == 0:
-        risk = "CRITICAL"
-        prediction = (
-            "If the OSD remains down, the cluster will enter complete data "
-            "unavailability. Any additional failure will cause total outage."
-        )
-    elif metrics["objects_degraded_pct"] > 30:
-        risk = "HIGH"
-        prediction = "High probability of service degradation within 24–48 hours."
-    else:
-        risk = "LOW"
-        prediction = "Cluster is stable with no immediate failure risk."
-
-    return risk, prediction
-
-# -------------------------------
-# STEP 4: PDF GENERATION
-# -------------------------------
-def generate_pdf(metrics, rca_text, risk, prediction):
-    styles = getSampleStyleSheet()
-    doc = SimpleDocTemplate(PDF_OUTPUT, pagesize=A4)
-    story = []
-
-    story.append(Paragraph("<b>Ceph Storage Cluster – RCA & Prediction Report</b>", styles["Title"]))
-    story.append(Spacer(1, 0.3 * inch))
-
-    story.append(Paragraph("<b>Report Timestamp:</b> " + metrics["timestamp"], styles["Normal"]))
-    story.append(Spacer(1, 0.2 * inch))
-
-    # Cluster Summary Table
-    table_data = [
-        ["Metric", "Value"],
-        ["Cluster Health", metrics["cluster_health"]],
-        ["OSDs Up", f"{metrics['osd_up']} / {metrics['osd_total']}"],
-        ["PGs Degraded", metrics["pgs_degraded"]],
-        ["PGs Undersized", metrics["pgs_undersized"]],
-        ["Degraded Objects (%)", metrics["objects_degraded_pct"]],
-        ["Disk Usage", f"{metrics['disk_used_gb']}GB / {metrics['disk_total_gb']}GB"],
-        ["MON Quorum", metrics["mon_quorum"]],
-    ]
-
-    story.append(Table(table_data, hAlign="LEFT"))
-    story.append(Spacer(1, 0.3 * inch))
-
-    # RCA Section
-    story.append(Paragraph("<b>Root Cause Analysis (AI Generated)</b>", styles["Heading2"]))
-    for line in rca_text.split("\n"):
-        story.append(Paragraph(line, styles["Normal"]))
-    story.append(Spacer(1, 0.3 * inch))
-
-    # Prediction Section
-    story.append(Paragraph("<b>Failure Prediction</b>", styles["Heading2"]))
-    story.append(Paragraph(f"<b>Risk Level:</b> {risk}", styles["Normal"]))
-    story.append(Paragraph(f"<b>Prediction:</b> {prediction}", styles["Normal"]))
-
-    doc.build(story)
-
-# -------------------------------
-# MAIN EXECUTION
-# -------------------------------
-if __name__ == "__main__":
-    print("[1] Collecting Ceph metrics...")
-    metrics = collect_ceph_metrics()
-
-    print("[2] Generating RCA using Groq...")
-    rca_text = generate_rca_with_groq(metrics)
-
+# ===============================
+def predict_failure(metrics_json):
     print("[3] Predicting failure risk...")
-    risk, prediction = predict_failure(metrics)
 
-    print("[4] Generating PDF report...")
-    generate_pdf(metrics, rca_text, risk, prediction)
+    risk = "LOW"
+    reasons = []
 
-    print(f"\n✅ RCA PDF Generated Successfully: {PDF_OUTPUT}")
+    metrics = json.loads(metrics_json)
+
+    for item in metrics.get("osd_up", []):
+        if float(item["value"][1]) == 0:
+            risk = "HIGH"
+            reasons.append("OSD down detected")
+
+    if metrics.get("pg_degraded"):
+        risk = "HIGH"
+        reasons.append("Degraded PGs present")
+
+    if metrics.get("pg_undersized"):
+        risk = "HIGH"
+        reasons.append("Undersized PGs detected")
+
+    prediction = f"""
+Failure Risk Level: {risk}
+
+Reasons:
+- {"; ".join(reasons) if reasons else "No critical issues detected"}
+
+Estimated Time to Impact:
+- Immediate to short-term if no action taken
+"""
+
+    return prediction
+
+# ===============================
+# STEP 4: PDF GENERATION
+# ===============================
+def generate_pdf(rca, prediction, metrics):
+    print("[4] Generating RCA PDF report...")
+
+    doc = SimpleDocTemplate(PDF_REPORT)
+    styles = getSampleStyleSheet()
+    content = []
+
+    content.append(Paragraph("<b>Ceph RCA & Failure Prediction Report</b>", styles["Title"]))
+    content.append(Spacer(1, 12))
+
+    content.append(Paragraph(f"<b>Date:</b> {datetime.now()}", styles["Normal"]))
+    content.append(Spacer(1, 12))
+
+    content.append(Paragraph("<b>Cluster Metrics</b>", styles["Heading2"]))
+    content.append(Paragraph(f"<pre>{metrics}</pre>", styles["Code"]))
+    content.append(Spacer(1, 12))
+
+    content.append(Paragraph("<b>Root Cause Analysis</b>", styles["Heading2"]))
+    content.append(Paragraph(rca.replace("\n", "<br/>"), styles["Normal"]))
+    content.append(Spacer(1, 12))
+
+    content.append(Paragraph("<b>Failure Prediction</b>", styles["Heading2"]))
+    content.append(Paragraph(prediction.replace("\n", "<br/>"), styles["Normal"]))
+
+    doc.build(content)
+    print(f"✅ PDF Generated: {PDF_REPORT}")
+
+# ===============================
+# MAIN EXECUTION
+# ===============================
+if __name__ == "__main__":
+    metrics = collect_ceph_metrics()
+    rca_text = generate_rca_with_groq(metrics)
+    prediction_text = predict_failure(metrics)
+    generate_pdf(rca_text, prediction_text, metrics)
