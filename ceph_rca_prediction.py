@@ -57,7 +57,7 @@ Metrics:
 """
 
     payload = {
-        "model": "llama3-70b-8192",
+        "model": "llama-3.1-8b-instant",
         "messages": [
             {"role": "system", "content": "You are an expert Ceph SRE."},
             {"role": "user", "content": prompt}
