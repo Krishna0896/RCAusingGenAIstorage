@@ -86,42 +86,38 @@ Provide Root Cause Analysis and remediation steps.
 # ===============================
 # STEP 3: FAILURE PREDICTION
 # ===============================
-def predict_failure(metrics_json):
-    print("[3] Predicting failure risk...")
 
-    risk = "LOW"
-    reasons = []
-
-    metrics = json.loads(metrics_json)
-
-    for item in metrics.get("osd_up", []):
-        if float(item["value"][1]) == 0:
-            risk = "HIGH"
-            reasons.append("OSD down detected")
-
-    if metrics.get("pg_degraded"):
-        risk = "HIGH"
-        reasons.append("Degraded PGs present")
-
-    if metrics.get("pg_undersized"):
-        risk = "HIGH"
-        reasons.append("Undersized PGs detected")
-
-    prediction = f"""
-Failure Risk Level: {risk}
-
-Reasons:
-- {"; ".join(reasons) if reasons else "No critical issues detected"}
-
-Estimated Time to Impact:
-- Immediate to short-term if no action taken
-"""
-
-    return prediction
 
 # ===============================
 # STEP 4: PDF GENERATION
-# ===============================
+# ===============================def predict_failure(metrics):
+    risk_score = 0
+    reasons = []
+
+    if float(metrics["cluster_health"]) != 1:
+        risk_score += 50
+        reasons.append("Cluster health is not OK")
+
+    if float(metrics["osd_up"]) < float(metrics["osd_in"]):
+        risk_score += 30
+        reasons.append("Some OSDs are down")
+
+    if float(metrics["mon_quorum"]) != 1:
+        risk_score += 20
+        reasons.append("Monitor quorum issue")
+
+    risk_level = (
+        "LOW" if risk_score < 30 else
+        "MEDIUM" if risk_score < 60 else
+        "HIGH"
+    )
+
+    return {
+        "risk_score": risk_score,
+        "risk_level": risk_level,
+        "reasons": reasons
+    }
+
 def generate_pdf(rca, prediction, metrics):
     print("[4] Generating RCA PDF report...")
 
