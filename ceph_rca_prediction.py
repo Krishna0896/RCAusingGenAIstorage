@@ -8,7 +8,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 # ===============================
 # CONFIGURATION
 # ===============================
-PROMETHEUS_URL = "http://localhost:9095"
+PROMETHEUS_URL = "http://localhost:9090"
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")   # 🔐 SAFE
 PDF_REPORT = "Ceph_RCA_Final_Report.pdf"
 
@@ -22,7 +22,9 @@ def query_prometheus(query):
     url = f"{PROMETHEUS_URL}/api/v1/query"
     r = requests.get(url, params={"query": query}, timeout=10)
     r.raise_for_status()
-    return r.json()["data"]["result"]
+    result = r.json()["data"]["result"]
+    return result[0]["value"][1] if result else "0"
+
 
 def collect_ceph_metrics():
     print("[1] Collecting Ceph metrics from Prometheus...")
