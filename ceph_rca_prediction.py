@@ -1,158 +1,181 @@
 import requests
 import json
 from datetime import datetime
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, ListFlowable, ListItem
+from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
 
-# ---------------- CONFIG ----------------
+# ===============================
+# CONFIG
+# ===============================
 PROMETHEUS_URL = "http://localhost:9090"
-TIMEOUT = 10
 PDF_FILE = "Ceph_RCA_Report.pdf"
 
-# ---------------- PROMETHEUS QUERY ----------------
+# ===============================
+# PROMETHEUS QUERY FUNCTION
+# ===============================
 def query_prometheus(query):
     url = f"{PROMETHEUS_URL}/api/v1/query"
-    try:
-        response = requests.get(url, params={"query": query}, timeout=TIMEOUT)
-        response.raise_for_status()
-        result = response.json()["data"]["result"]
-        if not result:
-            return None
-        return float(result[0]["value"][1])
-    except Exception as e:
-        print(f"[ERROR] Prometheus query failed: {query} → {e}")
-        return None
+    r = requests.get(url, params={"query": query}, timeout=10)
+    r.raise_for_status()
+    data = r.json()
+    if data["status"] == "success" and data["data"]["result"]:
+        return float(data["data"]["result"][0]["value"][1])
+    return 0
 
-# ---------------- METRICS COLLECTION ----------------
+# ===============================
+# COLLECT CEPH METRICS
+# ===============================
 def collect_ceph_metrics():
-    return {
-        "timestamp": datetime.utcnow().isoformat(),
+    print("[1] Collecting Ceph metrics from Prometheus...")
+
+    metrics = {
         "cluster_health": query_prometheus("ceph_health_status"),
         "osd_up": query_prometheus("ceph_osd_up"),
         "osd_in": query_prometheus("ceph_osd_in"),
-        "mon_quorum": query_prometheus("ceph_mon_quorum_status"),
         "pg_degraded": query_prometheus("ceph_pg_degraded"),
+        "pg_down": query_prometheus("ceph_pg_down"),
     }
 
-# ---------------- RCA LOGIC ----------------
-def generate_rca(metrics):
-    issues = []
+    return metrics
 
-    if metrics["cluster_health"] is not None and metrics["cluster_health"] != 1:
-        issues.append("Cluster health is WARNING or ERROR")
-
-    if metrics["osd_up"] is not None and metrics["osd_in"] is not None:
-        if metrics["osd_up"] < metrics["osd_in"]:
-            issues.append("One or more OSDs are DOWN")
-
-    if metrics["mon_quorum"] is not None and metrics["mon_quorum"] != 1:
-        issues.append("Monitor quorum issue detected")
-
-    if metrics["pg_degraded"] is not None and metrics["pg_degraded"] > 0:
-        issues.append("Degraded placement groups detected")
-
-    if not issues:
-        return "No critical issues detected. Ceph cluster is operating normally."
-
-    return " | ".join(issues)
-
-# ---------------- FAILURE PREDICTION ----------------
-def predict_failure(metrics):
-    score = 0
-    reasons = []
+# ===============================
+# RCA LOGIC
+# ===============================
+def generate_root_cause(metrics):
+    causes = []
 
     if metrics["cluster_health"] != 1:
-        score += 40
-        reasons.append("Unhealthy cluster state")
+        causes.append("Ceph cluster is reporting HEALTH_WARN or HEALTH_ERR")
 
     if metrics["osd_up"] < metrics["osd_in"]:
-        score += 30
-        reasons.append("OSD availability risk")
+        causes.append("One or more OSDs are down")
 
-    if metrics["pg_degraded"] and metrics["pg_degraded"] > 0:
-        score += 20
-        reasons.append("Degraded PGs detected")
+    if metrics["pg_degraded"] > 0:
+        causes.append("Placement Groups are in degraded state")
 
-    if score < 30:
-        level = "LOW"
-    elif score < 60:
-        level = "MEDIUM"
+    if metrics["pg_down"] > 0:
+        causes.append("One or more Placement Groups are down")
+
+    if not causes:
+        causes.append("No anomalies detected in Ceph cluster")
+
+    return causes
+
+# ===============================
+# IMPACT & ACTIONS
+# ===============================
+def derive_impact_and_actions(metrics):
+    impact = []
+    immediate = []
+    preventive = []
+
+    if metrics["cluster_health"] != 1:
+        impact.append("Potential SLA breach and reduced cluster reliability")
+        immediate.append("Investigate Ceph health warnings immediately")
+        preventive.append("Enable proactive health alerts and capacity monitoring")
+
+    if metrics["osd_up"] < metrics["osd_in"]:
+        impact.append("Reduced data redundancy and higher data loss risk")
+        immediate.append("Restart or replace the failed OSD")
+        preventive.append("Implement disk health checks and predictive failure analysis")
+
+    if metrics["pg_degraded"] > 0:
+        impact.append("I/O performance degradation for applications")
+        immediate.append("Allow PG recovery and monitor backfill progress")
+        preventive.append("Tune recovery limits and add OSD capacity")
+
+    if not impact:
+        impact.append("No customer-visible impact detected")
+        immediate.append("No immediate remediation required")
+        preventive.append("Continue standard monitoring and audits")
+
+    return impact, immediate, preventive
+
+# ===============================
+# FAILURE PREDICTION
+# ===============================
+def predict_failure(metrics):
+    score = 0
+
+    if metrics["cluster_health"] != 1:
+        score += 2
+    if metrics["osd_up"] < metrics["osd_in"]:
+        score += 2
+    if metrics["pg_degraded"] > 0:
+        score += 1
+
+    if score >= 4:
+        return "HIGH RISK"
+    elif score >= 2:
+        return "MEDIUM RISK"
     else:
-        level = "HIGH"
+        return "LOW RISK"
 
-    return level, score, reasons or ["No immediate failure indicators"]
+# ===============================
+# PDF GENERATION
+# ===============================
+def generate_pdf(metrics, root_causes, impact, immediate, preventive, risk):
+    print("[4] Generating RCA PDF report...")
 
-# ---------------- PDF GENERATION ----------------
-def generate_pdf(metrics, rca, prediction):
-    level, score, reasons = prediction
+    styles = getSampleStyleSheet()
+    story = []
 
-    c = canvas.Canvas(PDF_FILE, pagesize=A4)
-    width, height = A4
+    story.append(Paragraph("<b>Ceph Storage RCA Report</b>", styles["Title"]))
+    story.append(Spacer(1, 12))
 
-    y = height - 50
+    story.append(Paragraph(f"<b>Generated:</b> {datetime.now()}", styles["Normal"]))
+    story.append(Spacer(1, 12))
 
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(50, y, "Ceph Storage – RCA & Failure Prediction Report")
-
-    y -= 30
-    c.setFont("Helvetica", 10)
-    c.drawString(50, y, f"Generated On: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-    y -= 30
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(50, y, "Cluster Metrics")
-
-    c.setFont("Helvetica", 10)
-    y -= 20
+    story.append(Paragraph("<b>Cluster Metrics</b>", styles["Heading2"]))
     for k, v in metrics.items():
-        c.drawString(70, y, f"{k}: {v}")
-        y -= 15
+        story.append(Paragraph(f"{k}: {v}", styles["Normal"]))
 
-    y -= 10
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(50, y, "Root Cause Analysis")
+    story.append(Spacer(1, 12))
 
-    c.setFont("Helvetica", 10)
-    y -= 20
-    c.drawString(70, y, rca)
+    story.append(Paragraph("<b>Root Cause Analysis</b>", styles["Heading2"]))
+    story.append(ListFlowable([ListItem(Paragraph(c, styles["Normal"])) for c in root_causes]))
 
-    y -= 30
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(50, y, "Failure Risk Prediction")
+    story.append(Spacer(1, 12))
 
-    c.setFont("Helvetica", 10)
-    y -= 20
-    c.drawString(70, y, f"Risk Level: {level}")
-    y -= 15
-    c.drawString(70, y, f"Risk Score: {score}")
+    story.append(Paragraph("<b>Impact</b>", styles["Heading2"]))
+    story.append(ListFlowable([ListItem(Paragraph(i, styles["Normal"])) for i in impact]))
 
-    y -= 20
-    c.drawString(70, y, "Reasons:")
-    y -= 15
-    for r in reasons:
-        c.drawString(90, y, f"- {r}")
-        y -= 15
+    story.append(Spacer(1, 12))
 
-    c.showPage()
-    c.save()
+    story.append(Paragraph("<b>Immediate Remediation</b>", styles["Heading2"]))
+    story.append(ListFlowable([ListItem(Paragraph(i, styles["Normal"])) for i in immediate]))
 
-# ---------------- MAIN ----------------
-def main():
-    print("\n[1] Collecting Ceph metrics from Prometheus...")
-    metrics = collect_ceph_metrics()
-    print(json.dumps(metrics, indent=2))
+    story.append(Spacer(1, 12))
 
-    print("\n[2] Performing RCA...")
-    rca = generate_rca(metrics)
-    print(rca)
+    story.append(Paragraph("<b>Long-Term Preventive Actions</b>", styles["Heading2"]))
+    story.append(ListFlowable([ListItem(Paragraph(p, styles["Normal"])) for p in preventive]))
 
-    print("\n[3] Predicting failure risk...")
-    prediction = predict_failure(metrics)
+    story.append(Spacer(1, 12))
 
-    print("\n[4] Generating PDF report...")
-    generate_pdf(metrics, rca, prediction)
+    story.append(Paragraph("<b>Failure Risk Prediction</b>", styles["Heading2"]))
+    story.append(Paragraph(risk, styles["Normal"]))
 
-    print(f"\n✅ PDF Generated Successfully: {PDF_FILE}")
+    doc = SimpleDocTemplate(PDF_FILE, pagesize=A4)
+    doc.build(story)
 
+    print(f"✅ PDF generated: {PDF_FILE}")
+
+# ===============================
+# MAIN
+# ===============================
 if __name__ == "__main__":
-    main()
+    metrics = collect_ceph_metrics()
+
+    root_causes = generate_root_cause(metrics)
+    impact, immediate, preventive = derive_impact_and_actions(metrics)
+    risk = predict_failure(metrics)
+
+    generate_pdf(metrics, root_causes, impact, immediate, preventive, risk)
+
+    print("\n===== RCA SUMMARY =====")
+    print("Root Cause:", root_causes)
+    print("Impact:", impact)
+    print("Immediate Action:", immediate)
+    print("Preventive Action:", preventive)
+    print("Failure Risk:", risk)
