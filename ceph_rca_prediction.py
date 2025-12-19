@@ -27,39 +27,37 @@ def query_prometheus(query):
 
 
 def collect_ceph_metrics():
-    print("[1] Collecting Ceph metrics from Prometheus...")
-
-    metrics = {
+    return {
         "cluster_health": query_prometheus("ceph_health_status"),
         "osd_up": query_prometheus("ceph_osd_up"),
-        "pg_degraded": query_prometheus("ceph_pg_degraded"),
-        "pg_undersized": query_prometheus("ceph_pg_undersized"),
+        "osd_in": query_prometheus("ceph_osd_in"),
         "mon_quorum": query_prometheus("ceph_mon_quorum_status")
     }
 
+
+    metrics = collect_ceph_metrics()
+print("[DEBUG] Metrics collected:", metrics)
+
+
     return json.dumps(metrics, indent=2)
+def generate_rca_with_groq(metrics):
+    prompt = f"""
+You are a Ceph Storage Expert.
+
+Cluster Metrics:
+- Cluster Health: {metrics.get('cluster_health')}
+- OSDs Up: {metrics.get('osd_up')}
+- OSDs In: {metrics.get('osd_in')}
+- MON Quorum: {metrics.get('mon_quorum')}
+
+Provide Root Cause Analysis and remediation steps.
+"""
+    # Groq API call continues...
 
 # ===============================
 # STEP 2: GROQ RCA GENERATION
 # ===============================
-def generate_rca_with_groq(metrics):
-    print("[2] Generating RCA using Groq LLM...")
 
-    prompt = f"""
-You are a senior storage reliability engineer.
-
-Analyze the following Ceph cluster metrics and generate:
-1. Root Cause Analysis
-2. Impact
-3. Recommended Actions
-4. Failure Risk Prediction
-
-Metrics:
-- Cluster Health: {metrics['cluster_health']}
-- OSDs Up: {metrics['osd_up']}
-- OSDs In: {metrics['osd_in']}
-- Available Capacity (GB): {metrics['available_gb']}
-"""
 
 
     payload = {
