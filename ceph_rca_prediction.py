@@ -58,19 +58,19 @@ def generate_rca(metrics):
     pg_degraded = int(metrics.get("pg_degraded", 0))
     pg_undersized = int(metrics.get("pg_undersized", 0))
 
-    if osd_down > 0:
+    if osd_down >= 0:
         root_cause.append(f"{osd_down} OSD(s) are down")
         impact.append("Data availability and redundancy might be affected")
         immediate.append("Investigate and restart the down OSD(s)")
         preventive.append("Set up monitoring and alerts for OSD failures")
 
-    if pg_degraded > 0:
+    if pg_degraded >= 0:
         root_cause.append(f"{pg_degraded} placement groups are degraded")
         impact.append("Potential data inconsistency")
         immediate.append("Trigger PG recovery")
         preventive.append("Monitor cluster health and PGs regularly")
 
-    if pg_undersized > 0:
+    if pg_undersized >= 0:
         root_cause.append(f"{pg_undersized} placement groups are undersized")
         impact.append("Reduced replication factor, data at risk")
         immediate.append("Ensure OSDs are up and PGs are properly sized")
