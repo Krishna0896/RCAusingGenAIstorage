@@ -27,19 +27,14 @@ def query_prometheus(query):
 
 
 def collect_ceph_metrics():
-    return {
+    metrics = {
         "cluster_health": query_prometheus("ceph_health_status"),
         "osd_up": query_prometheus("ceph_osd_up"),
         "osd_in": query_prometheus("ceph_osd_in"),
         "mon_quorum": query_prometheus("ceph_mon_quorum_status")
     }
+    return metrics
 
-
-    metrics = collect_ceph_metrics()
-print("[DEBUG] Metrics collected:", metrics)
-
-
-    return json.dumps(metrics, indent=2)
 def generate_rca_with_groq(metrics):
     prompt = f"""
 You are a Ceph Storage Expert.
