@@ -56,7 +56,7 @@ def generate_rca(metrics):
             immediate_action.append("Bring OSDs back online or mark as out")
             preventive_action.append("Ensure monitoring alerts for OSD failures")
 
-        if metrics["pg_degraded"] > 0:
+        if metrics.get("pg_degraded", 0) and metrics["pg_degraded"] > 0:
             root_cause.append(f"{int(metrics['pg_degraded'])} PG(s) degraded")
             impact.append("Data placement not fully redundant")
             immediate_action.append("Monitor PG recovery and reweight OSDs if needed")
