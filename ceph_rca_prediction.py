@@ -44,17 +44,21 @@ def generate_rca_with_groq(metrics):
     print("[2] Generating RCA using Groq LLM...")
 
     prompt = f"""
-You are a Ceph Storage Reliability Engineer.
+You are a senior storage reliability engineer.
 
 Analyze the following Ceph cluster metrics and generate:
 1. Root Cause Analysis
 2. Impact
-3. Immediate Remediation
-4. Long-term Preventive Actions
+3. Recommended Actions
+4. Failure Risk Prediction
 
 Metrics:
-{metrics}
+- Cluster Health: {metrics['cluster_health']}
+- OSDs Up: {metrics['osd_up']}
+- OSDs In: {metrics['osd_in']}
+- Available Capacity (GB): {metrics['available_gb']}
 """
+
 
     payload = {
         "model": "llama-3.1-8b-instant",
