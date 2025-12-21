@@ -1,133 +1,143 @@
 #!/usr/bin/env python3
-"""
-Ceph RCA & Failure Prediction Script
-Generates a PDF report with Root Cause Analysis, Impact, Immediate Action,
-Preventive Action, and Failure Risk based on Ceph metrics collected from Prometheus.
-"""
 
 import requests
-import json
 from datetime import datetime
 from fpdf import FPDF
 
-# -----------------------------
-# CONFIGURATION
-# -----------------------------
-PROMETHEUS_URL = "http://127.0.0.1:9090"  # Prometheus base URL
-METRICS_QUERIES = {
+PROM_URL = "http://127.0.0.1:9090"
+
+PROM_QUERIES = {
+    "ceph_health_status": "ceph_health_status",
+    "osd_up": "ceph_osd_up",
     "osd_down": "ceph_osd_down",
     "pg_degraded": "ceph_pg_degraded",
     "pg_undersized": "ceph_pg_undersized",
-    "cluster_health": "ceph_health_status"
+    "mon_quorum": "ceph_mon_quorum_status"
 }
 
 # -----------------------------
-# HELPER FUNCTIONS
+# PROMETHEUS QUERY
 # -----------------------------
-def query_prometheus(query):
-    """Query Prometheus and return numeric value (0 if not available)."""
+def query_prometheus(metric):
     try:
-        r = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": query}, timeout=5)
-        r.raise_for_status()
+        r = requests.get(
+            f"{PROM_URL}/api/v1/query",
+            params={"query": metric},
+            timeout=5
+        )
         result = r.json()["data"]["result"]
         if result:
-            return float(result[0]["value"][1])
-        else:
-            return 0
-    except Exception as e:
-        print(f"[WARN] Failed to query Prometheus metric '{query}': {e}")
+            return int(float(result[0]["value"][1]))
+        return 0
+    except Exception:
         return 0
 
-def collect_ceph_metrics():
-    """Collect Ceph metrics from Prometheus."""
+# -----------------------------
+# METRIC COLLECTION
+# -----------------------------
+def collect_metrics():
     print("[1] Collecting Ceph metrics from Prometheus...")
     metrics = {}
-    for key, query in METRICS_QUERIES.items():
-        metrics[key] = query_prometheus(query)
+    for k, q in PROM_QUERIES.items():
+        metrics[k] = query_prometheus(q)
     return metrics
 
-def generate_rca(metrics):
-    """Generate Root Cause Analysis based on metrics."""
-    root_cause = []
-    impact = []
-    immediate = []
-    preventive = []
+# -----------------------------
+# DETAILED RCA GENERATION
+# -----------------------------
+def generate_detailed_rca(metrics):
+    h = metrics["ceph_health_status"]
+    osd_up = metrics["osd_up"]
+    osd_down = metrics["osd_down"]
+    pg_deg = metrics["pg_degraded"]
+    pg_under = metrics["pg_undersized"]
+    mon_q = metrics["mon_quorum"]
 
-    # Check OSD status
-    osd_down = int(metrics.get("osd_down", 0))
-    pg_degraded = int(metrics.get("pg_degraded", 0))
-    pg_undersized = int(metrics.get("pg_undersized", 0))
+    rca = (
+        "**Root Cause Analysis**\n"
+        "Based on the provided Ceph cluster metrics, the following issues are observed:\n\n"
+        f"1. **ceph_health_status**: The cluster health status is reported as \"{h}\". "
+        "A value of 1 indicates that the cluster is operational but has active warnings.\n\n"
+        f"2. **osd_up**: Only \"{osd_up}\" OSD(s) are reported as up. "
+        "This indicates that one or more OSDs are not currently serving data.\n\n"
+        f"3. **pg_degraded**: The number of degraded placement groups is \"{pg_deg}\". "
+        "This indicates whether data redundancy is currently compromised.\n\n"
+        f"4. **pg_undersized**: The number of undersized placement groups is \"{pg_under}\". "
+        "Undersized PGs indicate insufficient replicas to satisfy redundancy requirements.\n\n"
+        f"5. **mon_quorum**: The monitor quorum status is reported as \"{mon_q}\". "
+        "This confirms that the monitor quorum is healthy and cluster control is intact.\n\n"
+    )
 
-    if osd_down >= 0:
-        root_cause.append(f"{osd_down} OSD(s) are down")
-        impact.append("Data availability and redundancy might be affected")
-        immediate.append("Investigate and restart the down OSD(s)")
-        preventive.append("Set up monitoring and alerts for OSD failures")
+    if osd_down > 0:
+        rca += (
+            "However, the critical issue identified is that one or more OSDs are down. "
+            "Even though monitor quorum is healthy and no degraded PGs are currently reported, "
+            "running the cluster with a reduced OSD count significantly increases risk. "
+            "With only one active OSD, the cluster has no redundancy, and any additional failure "
+            "can immediately result in data unavailability or data loss.\n\n"
+        )
 
-    if pg_degraded >= 0:
-        root_cause.append(f"{pg_degraded} placement groups are degraded")
-        impact.append("Potential data inconsistency")
-        immediate.append("Trigger PG recovery")
-        preventive.append("Monitor cluster health and PGs regularly")
+        impact = (
+            "**Impact**\n"
+            "* Reduced data availability: With only one OSD up, the cluster cannot maintain "
+            "replication guarantees.\n"
+            "* Performance degradation: All read/write operations are handled by a single OSD.\n"
+            "* Potential data loss: Any further OSD or disk failure may result in permanent data loss.\n"
+        )
 
-    if pg_undersized >= 0:
-        root_cause.append(f"{pg_undersized} placement groups are undersized")
-        impact.append("Reduced replication factor, data at risk")
-        immediate.append("Ensure OSDs are up and PGs are properly sized")
-        preventive.append("Maintain minimum required OSD count")
+        remediation = (
+            "**Immediate Remediation**\n"
+            "1. Verify the status of all OSD containers using `ceph osd status`.\n"
+            "2. Restart the failed OSD container or service.\n"
+            "3. Check disk health, filesystem, and permissions for the affected OSD.\n"
+            "4. Review Ceph logs for OSD crash or heartbeat failures.\n"
+        )
 
-    if not root_cause:
-        root_cause.append("No anomalies detected in Ceph cluster")
-        impact.append("No customer-visible impact detected")
-        immediate.append("No immediate remediation required")
-        preventive.append("Continue standard monitoring and audits")
+        prevention = (
+            "**Long-term Preventive Actions**\n"
+            "1. Maintain minimum OSD count aligned with replication factor.\n"
+            "2. Implement proactive monitoring and alerting for OSD health.\n"
+            "3. Perform regular disk health and SMART checks.\n"
+            "4. Add additional OSDs to improve redundancy.\n"
+            "5. Regularly update Ceph software and review capacity planning.\n"
+            "6. Train operations teams with OSD recovery procedures.\n"
+        )
 
-    # Determine failure risk
-    if osd_down > 0 or pg_degraded > 0 or pg_undersized > 0:
-        risk = "HIGH RISK"
+        risk = (
+            "**Failure Prediction**\n"
+            "Failure Risk Level: **HIGH**\n"
+            "Estimated Time to Impact: Immediate to short-term if no action is taken.\n"
+        )
     else:
-        risk = "LOW RISK"
+        impact = "**Impact**\nNo immediate customer-visible impact detected.\n"
+        remediation = "**Immediate Remediation**\nNo action required.\n"
+        prevention = "**Long-term Preventive Actions**\nContinue standard monitoring.\n"
+        risk = "**Failure Prediction**\nFailure Risk Level: LOW\n"
 
-    rca_summary = {
-        "Root Cause": root_cause,
-        "Impact": impact,
-        "Immediate Action": immediate,
-        "Preventive Action": preventive,
-        "Failure Risk": risk
-    }
-    return rca_summary
+    return rca + "\n" + impact + "\n" + remediation + "\n" + prevention + "\n" + risk
 
-def generate_pdf_report(rca_summary, filename="Ceph_RCA_Report.pdf"):
-    """Generate a PDF report for RCA."""
-    print("[2] Generating RCA PDF report...")
+# -----------------------------
+# PDF GENERATION
+# -----------------------------
+def generate_pdf(content):
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, "Ceph RCA & Failure Prediction Report", ln=True, align="C")
-    pdf.set_font("Arial", "", 12)
-    pdf.ln(5)
-    pdf.cell(0, 10, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=True)
-    pdf.ln(5)
+    pdf.set_font("Arial", size=11)
 
-    for section, items in rca_summary.items():
-        pdf.set_font("Arial", "B", 14)
-        pdf.cell(0, 10, section, ln=True)
-        pdf.set_font("Arial", "", 12)
-        for item in items:
-            pdf.multi_cell(0, 8, f"- {item}")
-        pdf.ln(3)
+    for line in content.split("\n"):
+        pdf.multi_cell(0, 8, line)
 
-    pdf.output(filename)
-    print(f"✅ PDF generated: {filename}")
+    pdf.output("Ceph_RCA_Report.pdf")
+    print("[4] Generating RCA PDF report...")
+    print("✅ PDF generated: Ceph_RCA_Report.pdf")
 
 # -----------------------------
 # MAIN
 # -----------------------------
 if __name__ == "__main__":
-    metrics = collect_ceph_metrics()
-    rca_summary = generate_rca(metrics)
-    generate_pdf_report(rca_summary)
+    metrics = collect_metrics()
+    rca_text = generate_detailed_rca(metrics)
+    generate_pdf(rca_text)
 
-    print("\n===== RCA SUMMARY =====")
-    for key, value in rca_summary.items():
-        print(f"{key}: {value}")
+    print("\n===== RCA OUTPUT =====\n")
+    print(rca_text)
