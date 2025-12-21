@@ -6,7 +6,7 @@ from fpdf import FPDF
 # ================= CONFIG =================
 PROMETHEUS_URL = "http://localhost:9090"
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = "llama3-70b-8192"
+GROQ_MODEL = "llama-3.1-8b-instant"
 
 # ================= PROMETHEUS QUERY =================
 def query_prometheus(metric):
