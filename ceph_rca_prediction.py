@@ -1,142 +1,137 @@
-#!/usr/bin/env python3
-
+import os
 import requests
-from datetime import datetime
-from fpdf import FPDF
+import datetime
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
 
-PROM_URL = "http://127.0.0.1:9090"
+# ---------------- CONFIG ----------------
+PROMETHEUS_URL = "http://localhost:9090/api/v1/query"
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = "llama3-70b-8192"
+PDF_FILE = "Ceph_RCA_Report.pdf"
 
-PROM_QUERIES = {
-    "ceph_health_status": "ceph_health_status",
-    "osd_up": "ceph_osd_up",
-    "osd_down": "ceph_osd_down",
-    "pg_degraded": "ceph_pg_degraded",
-    "pg_undersized": "ceph_pg_undersized",
-    "mon_quorum": "ceph_mon_quorum_status"
-}
-
-# -----------------------------
-# PROMETHEUS QUERY
-# -----------------------------
+# ------------- PROMETHEUS QUERY ----------
 def query_prometheus(metric):
     try:
         r = requests.get(
-            f"{PROM_URL}/api/v1/query",
+            PROMETHEUS_URL,
             params={"query": metric},
             timeout=5
         )
         result = r.json()["data"]["result"]
-        if result:
-            return int(float(result[0]["value"][1]))
-        return 0
+        if not result:
+            return 0
+        return float(result[0]["value"][1])
     except Exception:
         return 0
 
-# -----------------------------
-# METRIC COLLECTION
-# -----------------------------
 def collect_metrics():
     print("[1] Collecting Ceph metrics from Prometheus...")
-    metrics = {}
-    for k, q in PROM_QUERIES.items():
-        metrics[k] = query_prometheus(q)
-    return metrics
+    return {
+        "ceph_health_status": query_prometheus("ceph_health_status"),
+        "osd_up": query_prometheus("ceph_osd_up"),
+        "osd_in": query_prometheus("ceph_osd_in"),
+        "pg_degraded": query_prometheus("ceph_pg_degraded"),
+        "pg_undersized": query_prometheus("ceph_pg_undersized"),
+        "mon_quorum": query_prometheus("ceph_mon_quorum_status")
+    }
 
-# -----------------------------
-# DETAILED RCA GENERATION
-# -----------------------------
-def generate_detailed_rca(metrics):
-    h = metrics["ceph_health_status"]
-    osd_up = metrics["osd_up"]
-    osd_down = metrics["osd_down"]
-    pg_deg = metrics["pg_degraded"]
-    pg_under = metrics["pg_undersized"]
-    mon_q = metrics["mon_quorum"]
+# ------------- GROQ RCA GENERATION ----------
+def generate_rca_with_groq(metrics):
+    print("[2] Generating detailed RCA using Groq AI...")
 
-    rca = (
-        "**Root Cause Analysis**\n"
-        "Based on the provided Ceph cluster metrics, the following issues are observed:\n\n"
-        f"1. **ceph_health_status**: The cluster health status is reported as \"{h}\". "
-        "A value of 1 indicates that the cluster is operational but has active warnings.\n\n"
-        f"2. **osd_up**: Only \"{osd_up}\" OSD(s) are reported as up. "
-        "This indicates that one or more OSDs are not currently serving data.\n\n"
-        f"3. **pg_degraded**: The number of degraded placement groups is \"{pg_deg}\". "
-        "This indicates whether data redundancy is currently compromised.\n\n"
-        f"4. **pg_undersized**: The number of undersized placement groups is \"{pg_under}\". "
-        "Undersized PGs indicate insufficient replicas to satisfy redundancy requirements.\n\n"
-        f"5. **mon_quorum**: The monitor quorum status is reported as \"{mon_q}\". "
-        "This confirms that the monitor quorum is healthy and cluster control is intact.\n\n"
+    prompt = f"""
+You are a Senior Ceph Storage Reliability Engineer.
+
+Based on the following Ceph cluster metrics, generate a **detailed Root Cause Analysis report**
+with professional production-grade explanation.
+
+Metrics:
+- ceph_health_status: {metrics['ceph_health_status']}
+- osd_up: {metrics['osd_up']}
+- osd_in: {metrics['osd_in']}
+- pg_degraded: {metrics['pg_degraded']}
+- pg_undersized: {metrics['pg_undersized']}
+- mon_quorum: {metrics['mon_quorum']}
+
+STRICT OUTPUT FORMAT (MANDATORY):
+
+**Root Cause Analysis**
+(detailed paragraph-style explanation)
+
+**Impact**
+(business and technical impact)
+
+**Immediate Remediation**
+(numbered actionable steps)
+
+**Long-term Preventive Actions**
+(numbered strategic actions)
+
+**Failure Prediction**
+- Failure Risk Level: HIGH / MEDIUM / LOW
+- Estimated Time to Impact
+- Reasoning
+
+IMPORTANT RULES:
+- If any OSD is down → Failure Risk MUST be HIGH
+- Explain why even a single OSD down is dangerous
+- Do NOT give generic answers
+- Write like an SRE presenting to leadership
+"""
+
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2
+    }
+
+    r = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=30
     )
 
-    if osd_down > 0:
-        rca += (
-            "However, the critical issue identified is that one or more OSDs are down. "
-            "Even though monitor quorum is healthy and no degraded PGs are currently reported, "
-            "running the cluster with a reduced OSD count significantly increases risk. "
-            "With only one active OSD, the cluster has no redundancy, and any additional failure "
-            "can immediately result in data unavailability or data loss.\n\n"
-        )
+    return r.json()["choices"][0]["message"]["content"]
 
-        impact = (
-            "**Impact**\n"
-            "* Reduced data availability: With only one OSD up, the cluster cannot maintain "
-            "replication guarantees.\n"
-            "* Performance degradation: All read/write operations are handled by a single OSD.\n"
-            "* Potential data loss: Any further OSD or disk failure may result in permanent data loss.\n"
-        )
+# ------------- PDF GENERATION ----------
+def generate_pdf(rca_text):
+    print("[3] Generating RCA PDF report...")
+    c = canvas.Canvas(PDF_FILE, pagesize=A4)
+    width, height = A4
 
-        remediation = (
-            "**Immediate Remediation**\n"
-            "1. Verify the status of all OSD containers using `ceph osd status`.\n"
-            "2. Restart the failed OSD container or service.\n"
-            "3. Check disk health, filesystem, and permissions for the affected OSD.\n"
-            "4. Review Ceph logs for OSD crash or heartbeat failures.\n"
-        )
+    y = height - 40
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(40, y, "Ceph RCA & Failure Prediction Report")
 
-        prevention = (
-            "**Long-term Preventive Actions**\n"
-            "1. Maintain minimum OSD count aligned with replication factor.\n"
-            "2. Implement proactive monitoring and alerting for OSD health.\n"
-            "3. Perform regular disk health and SMART checks.\n"
-            "4. Add additional OSDs to improve redundancy.\n"
-            "5. Regularly update Ceph software and review capacity planning.\n"
-            "6. Train operations teams with OSD recovery procedures.\n"
-        )
+    y -= 25
+    c.setFont("Helvetica", 10)
+    c.drawString(40, y, f"Generated on: {datetime.datetime.now()}")
 
-        risk = (
-            "**Failure Prediction**\n"
-            "Failure Risk Level: **HIGH**\n"
-            "Estimated Time to Impact: Immediate to short-term if no action is taken.\n"
-        )
-    else:
-        impact = "**Impact**\nNo immediate customer-visible impact detected.\n"
-        remediation = "**Immediate Remediation**\nNo action required.\n"
-        prevention = "**Long-term Preventive Actions**\nContinue standard monitoring.\n"
-        risk = "**Failure Prediction**\nFailure Risk Level: LOW\n"
+    y -= 30
+    c.setFont("Helvetica", 10)
 
-    return rca + "\n" + impact + "\n" + remediation + "\n" + prevention + "\n" + risk
+    for line in rca_text.split("\n"):
+        if y < 50:
+            c.showPage()
+            y = height - 40
+            c.setFont("Helvetica", 10)
+        c.drawString(40, y, line)
+        y -= 14
 
-# -----------------------------
-# PDF GENERATION
-# -----------------------------
-def generate_pdf(content):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", size=11)
+    c.save()
+    print(f"✅ PDF generated: {PDF_FILE}")
 
-    for line in content.split("\n"):
-        pdf.multi_cell(0, 8, line)
-
-    pdf.output("Ceph_RCA_Report.pdf")
-    print("[4] Generating RCA PDF report...")
-    print("✅ PDF generated: Ceph_RCA_Report.pdf")
-
-# -----------------------------
-# MAIN
-# -----------------------------
+# ------------- MAIN ----------
 if __name__ == "__main__":
     metrics = collect_metrics()
-    rca_text = generate_detailed_rca(metrics)
+    rca_text = generate_rca_with_groq(metrics)
     generate_pdf(rca_text)
 
     print("\n===== RCA OUTPUT =====\n")
