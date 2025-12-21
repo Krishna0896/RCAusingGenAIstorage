@@ -41,43 +41,98 @@ def generate_rca_with_groq(metrics):
     print("[2] Generating detailed RCA using Groq AI...")
 
     prompt = f"""
+def generate_rca_with_groq(metrics):
+    print("[2] Generating detailed RCA using Groq AI...")
+
+    prompt = f"""
 You are a Senior Ceph Storage Reliability Engineer.
 
-Based on the following Ceph cluster metrics, generate a **detailed Root Cause Analysis report**
-with professional production-grade explanation.
+Generate a detailed Root Cause Analysis with:
+- Root Cause Analysis
+- Impact
+- Immediate Remediation
+- Long-term Preventive Actions
+- Failure Prediction
 
 Metrics:
-- ceph_health_status: {metrics['ceph_health_status']}
-- osd_up: {metrics['osd_up']}
-- osd_in: {metrics['osd_in']}
-- pg_degraded: {metrics['pg_degraded']}
-- pg_undersized: {metrics['pg_undersized']}
-- mon_quorum: {metrics['mon_quorum']}
+ceph_health_status={metrics['ceph_health_status']}
+osd_up={metrics['osd_up']}
+osd_in={metrics['osd_in']}
+pg_degraded={metrics['pg_degraded']}
+pg_undersized={metrics['pg_undersized']}
+mon_quorum={metrics['mon_quorum']}
 
-STRICT OUTPUT FORMAT (MANDATORY):
+RULE:
+- If any OSD is down, risk MUST be HIGH
+"""
 
-**Root Cause Analysis**
-(detailed paragraph-style explanation)
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
 
-**Impact**
-(business and technical impact)
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2
+    }
 
-**Immediate Remediation**
-(numbered actionable steps)
+    try:
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
 
-**Long-term Preventive Actions**
-(numbered strategic actions)
+        data = response.json()
 
-**Failure Prediction**
-- Failure Risk Level: HIGH / MEDIUM / LOW
-- Estimated Time to Impact
-- Reasoning
+        # 🔥 CRITICAL FIX
+        if "choices" not in data:
+            return f"""
+Root Cause Analysis
+Groq AI failed to generate RCA.
 
-IMPORTANT RULES:
-- If any OSD is down → Failure Risk MUST be HIGH
-- Explain why even a single OSD down is dangerous
-- Do NOT give generic answers
-- Write like an SRE presenting to leadership
+Raw response received:
+{data}
+
+Likely Causes:
+- Invalid or missing GROQ_API_KEY
+- API rate limit exceeded
+- Network connectivity issue
+
+Impact
+RCA generation unavailable, but Ceph metrics indicate potential risk.
+
+Immediate Remediation
+1. Validate GROQ_API_KEY
+2. Check network access
+3. Retry request
+
+Failure Prediction
+Failure Risk Level: HIGH
+Reason: OSD down detected but LLM unavailable
+"""
+
+        return data["choices"][0]["message"]["content"]
+
+    except Exception as e:
+        return f"""
+Root Cause Analysis
+Groq AI exception occurred.
+
+Error:
+{str(e)}
+
+Impact
+Automated RCA unavailable.
+
+Immediate Remediation
+Check Groq API connectivity and credentials.
+
+Failure Prediction
+Failure Risk Level: HIGH
+Reason: OSD down with RCA generation failure
 """
 
     headers = {
