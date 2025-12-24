@@ -1,85 +1,49 @@
-#!/usr/bin/env python3
 import os
+import json
 import requests
 from datetime import datetime
-from fpdf import FPDF
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
 
-# ==============================
-# CONFIGURATION
-# ==============================
-PROMETHEUS_URL = "http://127.0.0.1:9090/api/v1/query"
+# ---------------- CONFIG ----------------
+PROM_URL = "http://127.0.0.1:9090/api/v1/query"
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Absolute paths (cron safe)
-# ==============================
-# ABSOLUTE PDF PATH (CRON SAFE)
-# ==============================
-HOME_DIR = os.path.expanduser("~")
-BASE_DIR = os.path.join(HOME_DIR, "RCAusingGenAIstorage")
-REPORT_DIR = os.path.join(BASE_DIR, "reports")
-
+REPORT_DIR = os.path.expanduser("~/RCAusingGenAIstorage/reports")
 os.makedirs(REPORT_DIR, exist_ok=True)
 
-PDF_FILE = os.path.join(
-    REPORT_DIR,
-    f"Ceph_RCA_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-)
+PDF_FILE = f"{REPORT_DIR}/Ceph_RCA_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
 
-# ==============================
-# PROMETHEUS QUERY FUNCTION
-# ==============================
-def query_prometheus(metric):
+# ------------- PROMETHEUS QUERY ----------
+def query_prom(query):
     try:
-        r = requests.get(
-            PROMETHEUS_URL,
-            params={"query": metric},
-            timeout=10
-        )
-        data = r.json()["data"]["result"]
-        if not data:
+        r = requests.get(PROM_URL, params={"query": query}, timeout=5)
+        result = r.json()["data"]["result"]
+        if not result:
             return 0
-        return float(data[0]["value"][1])
+        return int(float(result[0]["value"][1]))
     except Exception:
         return 0
 
-
-# ==============================
-# COLLECT CEPH METRICS
-# ==============================
+# ------------- METRICS COLLECTION --------
 def collect_metrics():
     print("[1] Collecting Ceph metrics from Prometheus...")
     return {
-        "health": query_prometheus("ceph_health_status"),
-        "osd_up": query_prometheus("ceph_osd_up"),
-        "osd_in": query_prometheus("ceph_osd_in"),
-        "pg_degraded": query_prometheus("ceph_pg_degraded"),
-        "pg_undersized": query_prometheus("ceph_pg_undersized"),
-        "mon_quorum": query_prometheus("ceph_mon_quorum_status"),
+        "ceph_health_status": query_prom("ceph_health_status"),
+        "osd_up": query_prom("ceph_osd_up"),
+        "pg_degraded": query_prom("ceph_pg_degraded"),
+        "pg_undersized": query_prom("ceph_pg_undersized"),
+        "mon_quorum": query_prom("ceph_mon_quorum_status"),
     }
 
-
-# ==============================
-# GROQ RCA GENERATION
-# ==============================
+# ------------- GROQ RCA GENERATION -------
 def generate_rca_with_groq(metrics):
     print("[2] Generating RCA using Groq AI...")
 
     prompt = f"""
-You are a Senior Storage Reliability Engineer.
+You are a Senior Ceph Storage SRE.
 
-Generate a DETAILED Root Cause Analysis for a Ceph cluster issue.
-
-Metrics:
-- ceph_health_status: {metrics['health']}
-- osd_up: {metrics['osd_up']}
-- osd_in: {metrics['osd_in']}
-- pg_degraded: {metrics['pg_degraded']}
-- pg_undersized: {metrics['pg_undersized']}
-- mon_quorum: {metrics['mon_quorum']}
-
-Rules:
-- Even if cluster health looks OK, OSD down must be treated as HIGH RISK
-- Output must include these sections EXACTLY:
+Generate a **DETAILED Root Cause Analysis** with the following sections:
 
 Root Cause Analysis
 Impact
@@ -87,10 +51,18 @@ Immediate Remediation
 Long-term Preventive Actions
 Failure Prediction
 
-Failure Prediction must include:
-- Risk Level (LOW / MEDIUM / HIGH)
-- Reasons
-- Estimated Time to Impact
+Ceph Metrics:
+- ceph_health_status: {metrics['ceph_health_status']}
+- osd_up: {metrics['osd_up']}
+- pg_degraded: {metrics['pg_degraded']}
+- pg_undersized: {metrics['pg_undersized']}
+- mon_quorum: {metrics['mon_quorum']}
+
+Rules:
+- If osd_up < 2 → Failure Risk = HIGH
+- Write enterprise-grade RCA
+- Bullet points + explanations
+- Assume management audience
 """
 
     headers = {
@@ -100,7 +72,9 @@ Failure Prediction must include:
 
     payload = {
         "model": "llama-3.1-8b-instant",
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
         "temperature": 0.3
     }
 
@@ -111,38 +85,31 @@ Failure Prediction must include:
         timeout=30
     )
 
-    return r.json()["choices"][0]["message"]["content"]
+    response = r.json()
 
+    # ✅ CORRECT GROQ RESPONSE PARSING
+    return response["choices"][0]["message"]["content"]
 
-# ==============================
-# PDF GENERATION
-# ==============================
+# ------------- PDF GENERATION -------------
 def generate_pdf(rca_text):
     print("[3] Generating RCA PDF report...")
 
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_page()
+    c = canvas.Canvas(PDF_FILE, pagesize=A4)
+    width, height = A4
 
-    pdf.set_font("Arial", "B", 14)
-    pdf.cell(0, 10, "Ceph RCA & Failure Prediction Report", ln=True)
-    pdf.ln(4)
+    text = c.beginText(40, height - 50)
+    text.setFont("Helvetica", 10)
 
-    pdf.set_font("Arial", size=10)
-    pdf.cell(0, 8, f"Generated on: {TIMESTAMP}", ln=True)
-    pdf.ln(5)
-
-    pdf.set_font("Arial", size=10)
     for line in rca_text.split("\n"):
-        pdf.multi_cell(0, 6, line)
+        text.textLine(line)
 
-    pdf.output(PDF_FILE)
+    c.drawText(text)
+    c.showPage()
+    c.save()
+
     print(f"✅ PDF generated: {PDF_FILE}")
 
-
-# ==============================
-# MAIN
-# ==============================
+# ------------- MAIN ----------------------
 def main():
     metrics = collect_metrics()
     rca_text = generate_rca_with_groq(metrics)
@@ -150,7 +117,6 @@ def main():
 
     print("\n===== RCA SUMMARY (Console) =====\n")
     print(rca_text)
-
 
 if __name__ == "__main__":
     main()
