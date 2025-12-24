@@ -111,9 +111,14 @@ def generate_pdf_report(rca_text):
 
 # ------------- MAIN ----------------------
 def main():
-    metrics = collect_metrics()
+    print("[1] Collecting Ceph metrics from Prometheus...")
+    metrics = collect_ceph_metrics()
+
+    print("[2] Generating RCA using Groq AI...")
     rca_text = generate_rca_with_groq(metrics)
-    generate_pdf(rca_text)
+
+    print("[3] Writing RCA PDF...")
+    generate_pdf_report(rca_text)   # ✅ correct function name
 
     print("\n===== RCA SUMMARY (Console) =====\n")
     print(rca_text)
