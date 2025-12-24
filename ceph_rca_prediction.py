@@ -11,8 +11,6 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 REPORT_DIR = os.path.expanduser("~/RCAusingGenAIstorage/reports")
 os.makedirs(REPORT_DIR, exist_ok=True)
 
-PDF_FILE = f"{REPORT_DIR}/Ceph_RCA_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-
 # ------------- PROMETHEUS QUERY ----------
 def query_prom(query):
     try:
