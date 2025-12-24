@@ -1,7 +1,6 @@
 import os
 import json
 import requests
-from datetime import datetime
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 
@@ -91,23 +90,26 @@ Rules:
     return response["choices"][0]["message"]["content"]
 
 # ------------- PDF GENERATION -------------
-def generate_pdf(rca_text):
+def generate_pdf_report(rca_text):
     print("[3] Generating RCA PDF report...")
 
-    c = canvas.Canvas(PDF_FILE, pagesize=A4)
-    width, height = A4
+    reports_dir = os.path.dirname(PDF_PATH)
+    os.makedirs(reports_dir, exist_ok=True)
 
-    text = c.beginText(40, height - 50)
-    text.setFont("Helvetica", 10)
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    pdf.set_font("Arial", size=11)
 
     for line in rca_text.split("\n"):
-        text.textLine(line)
+        pdf.multi_cell(0, 8, line)
 
-    c.drawText(text)
-    c.showPage()
-    c.save()
+    # 🔥 OVERWRITE SAME FILE EVERY TIME
+    pdf.output(PDF_PATH)
 
-    print(f"✅ PDF generated: {PDF_FILE}")
+    print(f"✅ PDF updated (overwritten): {PDF_PATH}")
+
 
 # ------------- MAIN ----------------------
 def main():
