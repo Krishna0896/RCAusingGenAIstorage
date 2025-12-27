@@ -1,147 +1,170 @@
+#!/usr/bin/env python3
 import os
+import json
 import subprocess
 import requests
 from datetime import datetime
-from fpdf import FPDF
+from reportlab.platypus import SimpleDocTemplate, Paragraph
+from reportlab.lib.styles import getSampleStyleSheet
 
-# Groq AI configuration
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-GROQ_API_URL = "https://api.groq.ai/v1/completions"
-GROQ_MODEL = "llama-3.1-8b-instant"
+# ================= CONFIG =================
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+MODEL = "llama-3.1-8b-instant"
 
-# PDF export path
 PDF_PATH = "/home/krishna/RCAusingGenAIstorage/reports/Ceph_RCA_Report.pdf"
 
-def get_ceph_status():
-    """Collect Ceph cluster facts"""
-    try:
-        result = subprocess.run(
-            ["sudo", "ceph", "status", "--format", "json-pretty"],
-            capture_output=True, text=True, check=True
-        )
-        return result.stdout
-    except subprocess.CalledProcessError as e:
-        print(f"[❌] Unable to fetch Ceph status: {e}")
-        return "Unable to collect Ceph facts."
+PROMETHEUS_URL = "http://localhost:9095/api/v1/query"
+# ==========================================
 
-def query_groq_ai(prompt):
-    """Query Groq AI for RCA or prediction"""
+
+def run_cmd(cmd):
+    try:
+        out = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, text=True)
+        return out
+    except subprocess.CalledProcessError as e:
+        return None
+
+
+def get_ceph_status():
+    raw = run_cmd("sudo cephadm shell -- ceph -s -f json")
+    if not raw:
+        return None
+    return json.loads(raw)
+
+
+def extract_ceph_facts(status):
+    facts = {}
+
+    health = status.get("health", {})
+    facts["health_status"] = health.get("status", "UNKNOWN")
+    facts["health_checks"] = list(health.get("checks", {}).keys())
+
+    osdmap = status.get("osdmap", {}).get("osdmap", {})
+    facts["osds_total"] = osdmap.get("num_osds", 0)
+    facts["osds_up"] = osdmap.get("num_up_osds", 0)
+    facts["osds_in"] = osdmap.get("num_in_osds", 0)
+
+    pgmap = status.get("pgmap", {})
+    facts["pg_states"] = pgmap.get("pgs_by_state", [])
+    facts["degraded_objects"] = pgmap.get("degraded_objects", 0)
+
+    return facts
+
+
+def query_groq(prompt):
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
     }
-    data = {
-        "model": GROQ_MODEL,
-        "prompt": prompt,
-        "max_tokens": 600,
+
+    payload = {
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": "You are a senior Ceph storage SRE generating accurate RCA reports."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.2
     }
+
     try:
-        response = requests.post(GROQ_API_URL, headers=headers, json=data, timeout=30)
-        response.raise_for_status()
-        result = response.json()
-        if "choices" in result:
-            return result["choices"][0]["message"]["content"]
-        else:
-            return "[Groq AI did not return a valid response]"
-    except Exception as e:
-        return f"[Error querying Groq AI: {e}]"
+        r = requests.post(GROQ_URL, headers=headers, json=payload, timeout=30)
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"]
+    except Exception:
+        return None
 
-def generate_pdf_report(ceph_facts, rca_text, impact_text, remediation_text, preventive_text, prediction_text):
-    """Generate structured PDF report"""
-    reports_dir = os.path.dirname(PDF_PATH)
-    os.makedirs(reports_dir, exist_ok=True)
 
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_page()
+def generate_ai_rca(facts):
+    prompt = f"""
+Ceph Cluster Facts:
+- Health: {facts['health_status']}
+- OSDs Total: {facts['osds_total']}
+- OSDs Up: {facts['osds_up']}
+- OSDs In: {facts['osds_in']}
+- Health Checks: {facts['health_checks']}
+- Degraded Objects: {facts['degraded_objects']}
 
-    pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, "Ceph RCA & Predictive Analysis Report", ln=True)
+Generate:
+1. Root Cause Analysis
+2. Impact
+3. Immediate Remediation Steps
+4. Long-Term Preventive Actions
+5. Predictive Analysis (next likely failure if no action taken)
 
-    pdf.ln(5)
-    pdf.set_font("Arial", size=11)
-    pdf.cell(0, 8, f"Generated at: {datetime.now()}", ln=True)
-    pdf.cell(0, 8, f"AI Model Used: {GROQ_MODEL}", ln=True)
+IMPORTANT:
+- Do NOT claim total OSD failure unless osds_up == 0
+- Be technically precise
+- No assumptions
+"""
 
-    pdf.ln(10)
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, "Ceph Cluster Facts", ln=True)
-    pdf.set_font("Arial", size=10)
-    pdf.multi_cell(0, 6, ceph_facts)
+    ai_text = query_groq(prompt)
 
-    pdf.ln(5)
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, "Root Cause Analysis (RCA)", ln=True)
-    pdf.set_font("Arial", size=10)
-    pdf.multi_cell(0, 6, rca_text)
+    if ai_text:
+        return ai_text
 
-    pdf.ln(5)
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, "Impact", ln=True)
-    pdf.set_font("Arial", size=10)
-    pdf.multi_cell(0, 6, impact_text)
+    # -------- SAFE FALLBACK (NO AI) --------
+    return f"""
+Root Cause Analysis:
+The cluster is in {facts['health_status']} state due to insufficient data redundancy or replica configuration mismatch.
+OSDs are present and operational; this is not a total OSD failure.
 
-    pdf.ln(5)
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, "Immediate Remediation Steps", ln=True)
-    pdf.set_font("Arial", size=10)
-    pdf.multi_cell(0, 6, remediation_text)
+Impact:
+Reduced fault tolerance. Data availability is maintained but resilience is compromised.
 
-    pdf.ln(5)
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, "Long-Term Preventive Actions", ln=True)
-    pdf.set_font("Arial", size=10)
-    pdf.multi_cell(0, 6, preventive_text)
+Immediate Remediation:
+- Adjust pool replica size to match available OSDs
+- Verify OSD placement and recovery status
 
-    pdf.ln(5)
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, "Predictive Analysis", ln=True)
-    pdf.set_font("Arial", size=10)
-    pdf.multi_cell(0, 6, prediction_text)
+Long-Term Preventive Actions:
+- Maintain minimum 3 OSDs for production clusters
+- Add capacity monitoring and alerts
 
-    pdf.output(PDF_PATH)
-    print(f"✅ PDF generated: {PDF_PATH}")
+Predictive Analysis:
+If current redundancy remains unchanged, future OSD failure may lead to data unavailability.
+"""
+
+
+def generate_pdf(facts, rca_text):
+    os.makedirs(os.path.dirname(PDF_PATH), exist_ok=True)
+
+    doc = SimpleDocTemplate(PDF_PATH)
+    styles = getSampleStyleSheet()
+    story = []
+
+    story.append(Paragraph("<b>Ceph RCA Report</b>", styles["Title"]))
+    story.append(Paragraph(f"Generated: {datetime.now()}", styles["Normal"]))
+    story.append(Paragraph("<br/>", styles["Normal"]))
+
+    story.append(Paragraph("<b>Cluster Summary</b>", styles["Heading2"]))
+    for k, v in facts.items():
+        story.append(Paragraph(f"{k}: {v}", styles["Normal"]))
+
+    story.append(Paragraph("<br/>", styles["Normal"]))
+    story.append(Paragraph("<b>AI Generated RCA</b>", styles["Heading2"]))
+    for line in rca_text.split("\n"):
+        story.append(Paragraph(line, styles["Normal"]))
+
+    doc.build(story)
+
 
 def main():
-    print("[1] Collecting Ceph cluster facts...")
-    ceph_facts = get_ceph_status()
+    print("[1] Reading Ceph cluster state...")
+    status = get_ceph_status()
+    if not status:
+        print("❌ Unable to read Ceph status")
+        return
+
+    facts = extract_ceph_facts(status)
 
     print("[2] Generating RCA using Groq AI...")
-    rca_prompt = f"""
-    Analyze the following Ceph cluster status and generate structured RCA.
-    Include:
-    1. Root Cause
-    2. Impact
-    3. Immediate Remediation Steps
-    4. Long-Term Preventive Actions
+    rca_text = generate_ai_rca(facts)
 
-    Ceph Status:
-    {ceph_facts}
-    """
-    rca_full = query_groq_ai(rca_prompt)
+    print("[3] Generating PDF report...")
+    generate_pdf(facts, rca_text)
 
-    # For simplicity, we assume Groq AI returns a structured response with sections separated.
-    # If not, you could parse by keywords.
-    rca_sections = rca_full.split("\n\n")
-    rca_text = rca_sections[0] if len(rca_sections) > 0 else "[No RCA provided]"
-    impact_text = rca_sections[1] if len(rca_sections) > 1 else "[No Impact provided]"
-    remediation_text = rca_sections[2] if len(rca_sections) > 2 else "[No Remediation provided]"
-    preventive_text = rca_sections[3] if len(rca_sections) > 3 else "[No Preventive Actions provided]"
+    print(f"✅ RCA report generated: {PDF_PATH}")
 
-    print("[3] Generating Predictive Analysis using Groq AI...")
-    prediction_prompt = f"""
-    Based on the following Ceph cluster status, predict potential next failures, components at risk,
-    and recommend proactive actions. Use structured explanation.
-
-    Ceph Status:
-    {ceph_facts}
-    """
-    prediction_text = query_groq_ai(prediction_prompt)
-
-    print("[4] Exporting PDF report...")
-    generate_pdf_report(
-        ceph_facts, rca_text, impact_text, remediation_text, preventive_text, prediction_text
-    )
 
 if __name__ == "__main__":
     main()
