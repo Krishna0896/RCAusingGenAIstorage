@@ -27,10 +27,35 @@ def run_cmd(cmd):
 
 
 def get_ceph_status():
-    raw = run_cmd("sudo cephadm shell -- ceph -s -f json")
-    if not raw:
+    cmd = "sudo cephadm shell -- ceph -s -f json"
+    try:
+        output = subprocess.check_output(
+            cmd,
+            shell=True,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
+    except subprocess.CalledProcessError as e:
+        print("❌ Failed to run ceph command")
+        print(e.output)
         return None
-    return json.loads(raw)
+
+    # 🔴 cephadm prints noise before JSON — strip it
+    json_start = output.find("{")
+    if json_start == -1:
+        print("❌ No JSON found in ceph output")
+        print(output)
+        return None
+
+    json_text = output[json_start:]
+
+    try:
+        return json.loads(json_text)
+    except json.JSONDecodeError as e:
+        print("❌ JSON parsing failed")
+        print(json_text)
+        return None
+
 
 
 def extract_ceph_facts(status):
