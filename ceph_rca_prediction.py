@@ -34,7 +34,7 @@ def run_cmd(cmd):
 # =========================
 
 def get_ceph_status():
-    raw = run_cmd("ceph -s --format json")
+    raw = run_cmd("sudo cephadm shell -- ceph -s --format json")
     if not raw:
         return None
 
@@ -53,6 +53,7 @@ def get_ceph_status():
         "osds_in": osds_in,
         "warnings": warnings
     }
+
 
 # =========================
 # PROMETHEUS METRICS
