@@ -104,42 +104,48 @@ OUTPUT FORMAT:
 # ==============================
 
 def generate_pdf_report(ceph_facts, rca_text):
+    from fpdf import FPDF
+    import os
+    from datetime import datetime
+
+    PDF_PATH = "/home/krishna/RCAusingGenAIstorage/reports/Ceph_RCA_Report.pdf"
+
+    # ✅ DEFINE FIRST
     reports_dir = os.path.dirname(PDF_PATH)
 
-if not os.path.exists(reports_dir):
-    os.makedirs(reports_dir)
+    # ✅ THEN USE
+    if not os.path.exists(reports_dir):
+        os.makedirs(reports_dir)
 
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
 
     pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, "Ceph RCA Report", ln=True)
+    pdf.cell(0, 10, "Ceph RCA Report (Generated using Groq AI)", ln=True)
 
-    pdf.set_font("Arial", size=11)
     pdf.ln(5)
-    pdf.cell(0, 8, f"Generated: {ceph_facts['timestamp']}", ln=True)
-    pdf.cell(0, 8, f"Cluster Health: {ceph_facts['cluster_health']}", ln=True)
+    pdf.set_font("Arial", size=11)
+    pdf.cell(0, 8, f"Generated at: {datetime.now()}", ln=True)
+
+    pdf.ln(10)
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 10, "Ceph Cluster Facts", ln=True)
+
+    pdf.set_font("Arial", size=10)
+    for k, v in ceph_facts.items():
+        pdf.multi_cell(0, 6, f"{k}: {v}")
 
     pdf.ln(5)
     pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 8, "OSD Summary", ln=True)
+    pdf.cell(0, 10, "AI Generated RCA", ln=True)
 
-    pdf.set_font("Arial", size=11)
-    osd = ceph_facts["osd_summary"]
-    pdf.cell(0, 8, f"Total OSDs: {osd['total']}", ln=True)
-    pdf.cell(0, 8, f"OSDs Up: {osd['up']}", ln=True)
-    pdf.cell(0, 8, f"OSDs In: {osd['in']}", ln=True)
-
-    pdf.ln(5)
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 8, "AI-Generated Root Cause Analysis (Groq)", ln=True)
-
-    pdf.set_font("Arial", size=11)
-    for line in rca_text.split("\n"):
-        pdf.multi_cell(0, 7, line)
+    pdf.set_font("Arial", size=10)
+    pdf.multi_cell(0, 6, rca_text)
 
     pdf.output(PDF_PATH)
+    print(f"✅ RCA PDF generated: {PDF_PATH}")
+
 
 # ==============================
 # MAIN
