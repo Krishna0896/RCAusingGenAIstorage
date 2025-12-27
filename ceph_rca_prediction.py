@@ -1,192 +1,159 @@
+#!/usr/bin/env python3
+
 import subprocess
 import json
 import os
-import requests
+import datetime
+from groq import Groq
 from fpdf import FPDF
-from datetime import datetime
 
-# ================= CONFIG =================
+# ==============================
+# CONFIGURATION
+# ==============================
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = "llama-3.1-8b-instant"
+PDF_PATH = "/home/RCAusingGenAIstorage/reports/Ceph_RCA_Report.pdf"
+GROQ_MODEL = "llama-3.1-70b-versatile"
 
-PDF_PATH = os.path.expanduser(
-    "~/RCAusingGenAIstorage/reports/ceph_rca_latest.pdf"
-)
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-# ================= UTIL =================
+# ==============================
+# CEph DATA COLLECTION
+# ==============================
 
 def run_cmd(cmd):
-    try:
-        return subprocess.check_output(
-            cmd, shell=True, stderr=subprocess.DEVNULL
-        ).decode().strip()
-    except subprocess.CalledProcessError:
-        return None
+    result = subprocess.run(
+        cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip())
+    return result.stdout.strip()
 
-# ================= CEPH STATUS =================
 
 def get_ceph_status():
-    raw = run_cmd("sudo cephadm shell -- ceph -s --format json")
-    if not raw:
-        return None
+    output = run_cmd("sudo cephadm shell -- ceph -s -f json")
+    return json.loads(output)
 
-    data = json.loads(raw)
 
-    health = data.get("health", {}).get("status", "UNKNOWN")
-    checks = data.get("health", {}).get("checks", {})
+def get_osd_status():
+    output = run_cmd("sudo cephadm shell -- ceph osd stat -f json")
+    return json.loads(output)
 
-    osd_info = data.get("osd", {})
-    osds_up = osd_info.get("num_up_osds", 0)
-    osds_in = osd_info.get("num_in_osds", 0)
 
-    return {
-        "health": health,
-        "checks": checks,
-        "osds_up": osds_up,
-        "osds_in": osds_in
+def get_pg_status():
+    output = run_cmd("sudo cephadm shell -- ceph pg stat -f json")
+    return output
+
+
+def collect_ceph_facts():
+    status = get_ceph_status()
+    osd_stat = get_osd_status()
+    pg_stat = get_pg_status()
+
+    facts = {
+        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S IST"),
+        "cluster_health": status["health"]["status"],
+        "health_checks": list(status["health"]["checks"].keys())
+            if "checks" in status["health"] else [],
+        "osd_summary": {
+            "total": osd_stat["num_osds"],
+            "up": osd_stat["num_up_osds"],
+            "in": osd_stat["num_in_osds"]
+        },
+        "pg_summary_raw": pg_stat
     }
 
-# ================= RCA CLASSIFICATION =================
+    return facts
 
-def classify_incident(status):
-    if status["osds_up"] == 0:
-        return "TOTAL_OSD_OUTAGE"
+# ==============================
+# GROQ AI RCA ENGINE
+# ==============================
 
-    if status["health"] == "HEALTH_WARN":
-        if "PG_DEGRADED" in str(status["checks"]).upper():
-            return "DEGRADED_REDUNDANCY"
-        if "PG_UNDERSIZED" in str(status["checks"]).upper():
-            return "REPLICA_MISMATCH"
-        return "CAPACITY_OR_CONFIG_RISK"
-
-    if status["health"] == "HEALTH_OK":
-        return "NO_INCIDENT"
-
-    return "UNKNOWN_CONDITION"
-
-# ================= GROQ RCA =================
-
-def generate_rca_with_groq(status, incident_type):
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
+def generate_rca_with_groq(ceph_facts):
     prompt = f"""
-You are a Senior Ceph Storage SRE.
+You are a SENIOR Ceph Storage SRE.
 
-Generate a detailed Root Cause Analysis with ALL sections below.
+Below are VERIFIED FACTS collected LIVE from a Ceph cluster.
+DO NOT assume or hallucinate anything.
 
-Incident Type: {incident_type}
+FACTS (JSON):
+{json.dumps(ceph_facts, indent=2)}
 
-Ceph Status:
-- Health: {status["health"]}
-- OSDs Up: {status["osds_up"]}
-- OSDs In: {status["osds_in"]}
-- Health Checks: {json.dumps(status["checks"], indent=2)}
+INSTRUCTIONS:
+- If OSDs are UP, do NOT report OSD outage
+- If HEALTH_WARN, explain the exact reason
+- Be accurate, conservative, and professional
 
-MANDATORY SECTIONS:
-1. Summary
+OUTPUT FORMAT:
+1. Incident Summary
 2. Root Cause
-3. Impact Analysis
-4. Immediate Remediation Steps
-5. Risk & Failure Prediction
-6. Long-term Preventive Actions
+3. Impact
+4. Immediate Remediation
+5. Long-Term Preventive Actions
 """
 
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2
-    }
+    response = client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2
+    )
 
-    try:
-        r = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=60
-        )
-        response = r.json()
-    except Exception:
-        response = {}
+    return response.choices[0].message.content
 
-    # ✅ VALID RESPONSE
-    if "choices" in response and response["choices"]:
-        return response["choices"][0]["message"]["content"]
+# ==============================
+# PDF GENERATION
+# ==============================
 
-    # ❗ FALLBACK RCA (SAFE, CORRECT, STRUCTURED)
-    return generate_fallback_rca(status, incident_type)
-
-
-def generate_fallback_rca(status, incident_type):
-    return f"""
-1. Summary
-The Ceph cluster is currently in a {status["health"]} state. Automated RCA generation via AI
-was unavailable at the time of analysis, so a deterministic fallback RCA was generated.
-
-2. Root Cause
-Based on cluster telemetry, the incident type is classified as: {incident_type}.
-The primary contributing factor is related to Ceph health checks and OSD availability.
-
-3. Impact Analysis
-- OSDs Up: {status["osds_up"]}
-- OSDs In: {status["osds_in"]}
-- Potential impact includes reduced redundancy or availability depending on workload.
-
-4. Immediate Remediation Steps
-- Verify OSD daemon status using `ceph orch ps`
-- Check disk availability and OSD provisioning
-- Validate Ceph health warnings using `ceph health detail`
-
-5. Risk & Failure Prediction
-Failure Risk Level: MEDIUM to HIGH  
-If corrective actions are not taken, the cluster may experience degraded redundancy
-or service disruption.
-
-6. Long-term Preventive Actions
-- Ensure minimum OSD count matches pool replica size
-- Implement continuous monitoring with Prometheus alerts
-- Automate RCA execution with scheduled background jobs
-- Periodically validate OSD disk health and provisioning
-"""
-
-
-
-# ================= PDF =================
-
-def generate_pdf_report(text):
+def generate_pdf_report(ceph_facts, rca_text):
     os.makedirs(os.path.dirname(PDF_PATH), exist_ok=True)
 
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-    pdf.set_font("Arial", size=10)
 
-    pdf.multi_cell(0, 8, text)
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(0, 10, "Ceph RCA Report", ln=True)
+
+    pdf.set_font("Arial", size=11)
+    pdf.ln(5)
+    pdf.cell(0, 8, f"Generated: {ceph_facts['timestamp']}", ln=True)
+    pdf.cell(0, 8, f"Cluster Health: {ceph_facts['cluster_health']}", ln=True)
+
+    pdf.ln(5)
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "OSD Summary", ln=True)
+
+    pdf.set_font("Arial", size=11)
+    osd = ceph_facts["osd_summary"]
+    pdf.cell(0, 8, f"Total OSDs: {osd['total']}", ln=True)
+    pdf.cell(0, 8, f"OSDs Up: {osd['up']}", ln=True)
+    pdf.cell(0, 8, f"OSDs In: {osd['in']}", ln=True)
+
+    pdf.ln(5)
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "AI-Generated Root Cause Analysis (Groq)", ln=True)
+
+    pdf.set_font("Arial", size=11)
+    for line in rca_text.split("\n"):
+        pdf.multi_cell(0, 7, line)
+
     pdf.output(PDF_PATH)
 
-# ================= MAIN =================
+# ==============================
+# MAIN
+# ==============================
 
 def main():
-    print("[1] Checking Ceph status...")
-    status = get_ceph_status()
+    print("[1] Collecting Ceph cluster facts...")
+    ceph_facts = collect_ceph_facts()
 
-    if not status:
-        print("❌ Unable to fetch Ceph status")
-        return
+    print("[2] Generating RCA using Groq AI...")
+    rca_text = generate_rca_with_groq(ceph_facts)
 
-    print("[2] Classifying incident...")
-    incident_type = classify_incident(status)
+    print("[3] Exporting RCA to PDF...")
+    generate_pdf_report(ceph_facts, rca_text)
 
-    print("[3] Generating RCA using Groq AI...")
-    rca_text = generate_rca_with_groq(status, incident_type)
-
-    print("[4] Writing RCA PDF...")
-    generate_pdf_report(rca_text)
-
-    print(f"✅ RCA generated: {PDF_PATH}")
+    print(f"✅ RCA generated successfully:")
+    print(f"   {PDF_PATH}")
 
 if __name__ == "__main__":
     main()
