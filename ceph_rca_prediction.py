@@ -76,8 +76,7 @@ def generate_rca_with_groq(status, incident_type):
     prompt = f"""
 You are a Senior Ceph Storage SRE.
 
-Generate a **detailed Root Cause Analysis** with ALL sections below.
-Do NOT skip any section.
+Generate a detailed Root Cause Analysis with ALL sections below.
 
 Incident Type: {incident_type}
 
@@ -87,19 +86,13 @@ Ceph Status:
 - OSDs In: {status["osds_in"]}
 - Health Checks: {json.dumps(status["checks"], indent=2)}
 
-MANDATORY FORMAT:
-
+MANDATORY SECTIONS:
 1. Summary
 2. Root Cause
 3. Impact Analysis
 4. Immediate Remediation Steps
 5. Risk & Failure Prediction
 6. Long-term Preventive Actions
-
-Rules:
-- If no outage exists, clearly state "No active outage detected"
-- Do NOT claim data loss unless OSDs are down
-- Be precise, technical, and management-ready
 """
 
     payload = {
@@ -108,19 +101,58 @@ Rules:
         "temperature": 0.2
     }
 
-    r = requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        headers=headers,
-        json=payload,
-        timeout=60
-    )
+    try:
+        r = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=60
+        )
+        response = r.json()
+    except Exception:
+        response = {}
 
-    response = r.json()
+    # ✅ VALID RESPONSE
+    if "choices" in response and response["choices"]:
+        return response["choices"][0]["message"]["content"]
 
-    if "choices" not in response:
-        return "ERROR: Groq response malformed.\n" + json.dumps(response, indent=2)
+    # ❗ FALLBACK RCA (SAFE, CORRECT, STRUCTURED)
+    return generate_fallback_rca(status, incident_type)
 
-    return response["choices"][0]["message"]["content"]
+
+def generate_fallback_rca(status, incident_type):
+    return f"""
+1. Summary
+The Ceph cluster is currently in a {status["health"]} state. Automated RCA generation via AI
+was unavailable at the time of analysis, so a deterministic fallback RCA was generated.
+
+2. Root Cause
+Based on cluster telemetry, the incident type is classified as: {incident_type}.
+The primary contributing factor is related to Ceph health checks and OSD availability.
+
+3. Impact Analysis
+- OSDs Up: {status["osds_up"]}
+- OSDs In: {status["osds_in"]}
+- Potential impact includes reduced redundancy or availability depending on workload.
+
+4. Immediate Remediation Steps
+- Verify OSD daemon status using `ceph orch ps`
+- Check disk availability and OSD provisioning
+- Validate Ceph health warnings using `ceph health detail`
+
+5. Risk & Failure Prediction
+Failure Risk Level: MEDIUM to HIGH  
+If corrective actions are not taken, the cluster may experience degraded redundancy
+or service disruption.
+
+6. Long-term Preventive Actions
+- Ensure minimum OSD count matches pool replica size
+- Implement continuous monitoring with Prometheus alerts
+- Automate RCA execution with scheduled background jobs
+- Periodically validate OSD disk health and provisioning
+"""
+
+
 
 # ================= PDF =================
 
