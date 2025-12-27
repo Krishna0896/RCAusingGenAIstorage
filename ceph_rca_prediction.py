@@ -11,7 +11,7 @@ from fpdf import FPDF
 # CONFIGURATION
 # ==============================
 
-PDF_PATH = "/home/krishna/RCAusingGenAIstorage/reports/Ceph_RCA_Report.pdf""
+PDF_PATH = "/home/krishna/RCAusingGenAIstorage/reports/Ceph_RCA_Report.pdf"
 GROQ_MODEL = "llama-3.1-8b-instant"
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
