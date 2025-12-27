@@ -11,7 +11,7 @@ from fpdf import FPDF
 # CONFIGURATION
 # ==============================
 
-PDF_PATH = "/home/RCAusingGenAIstorage/reports/Ceph_RCA_Report.pdf"
+PDF_PATH = "/home/krishna/RCAusingGenAIstorage/reports/Ceph_RCA_Report.pdf""
 GROQ_MODEL = "llama-3.1-8b-instant"
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
@@ -104,7 +104,10 @@ OUTPUT FORMAT:
 # ==============================
 
 def generate_pdf_report(ceph_facts, rca_text):
-    os.makedirs(os.path.dirname(PDF_PATH), exist_ok=True)
+    reports_dir = os.path.dirname(PDF_PATH)
+
+if not os.path.exists(reports_dir):
+    os.makedirs(reports_dir)
 
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
