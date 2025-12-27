@@ -1,145 +1,213 @@
 #!/usr/bin/env python3
 
 import os
+import json
 import requests
-from fpdf import FPDF
+import subprocess
 from datetime import datetime
+from fpdf import FPDF
 
 # =========================
 # CONFIGURATION
 # =========================
 
-PROMETHEUS_URL = "http://localhost:9090/api/v1/query"
-
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.1-8b-instant"
-
+PROMETHEUS_URL = "http://localhost:9095/api/v1/query"
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-if not GROQ_API_KEY:
-    raise RuntimeError("❌ GROQ_API_KEY environment variable not set")
 
-BASE_DIR = os.path.expanduser("~/RCAusingGenAIstorage")
-REPORTS_DIR = os.path.join(BASE_DIR, "reports")
-PDF_PATH = os.path.join(REPORTS_DIR, "Ceph_RCA_Report.pdf")
+REPORTS_DIR = os.path.expanduser("~/RCAusingGenAIstorage/reports")
+PDF_PATH = os.path.join(REPORTS_DIR, "ceph_rca_latest.pdf")
+
+MODEL = "llama-3.1-8b-instant"
 
 # =========================
-# PROMETHEUS HELPERS
+# UTILITIES
 # =========================
 
-def query_prometheus(metric):
+def run_cmd(cmd):
     try:
-        r = requests.get(
-            PROMETHEUS_URL,
-            params={"query": metric},
-            timeout=5
-        )
-        result = r.json()["data"]["result"]
-        if not result:
-            return 0
-        return float(result[0]["value"][1])
-    except Exception:
-        return 0
+        return subprocess.check_output(cmd, shell=True, text=True)
+    except subprocess.CalledProcessError:
+        return ""
 
-def collect_ceph_metrics():
-    metrics = {
-        "ceph_health_status": query_prometheus("ceph_health_status"),
-        "osd_up": query_prometheus("ceph_osd_up"),
-        "osd_in": query_prometheus("ceph_osd_in"),
-        "pg_degraded": query_prometheus("ceph_pg_degraded"),
-        "pg_undersized": query_prometheus("ceph_pg_undersized"),
-        "mon_quorum": query_prometheus("ceph_mon_quorum_status"),
+# =========================
+# CEPH HEALTH CHECK
+# =========================
+
+def get_ceph_status():
+    raw = run_cmd("ceph -s --format json")
+    if not raw:
+        return None
+
+    data = json.loads(raw)
+    health = data["health"]["status"]
+
+    osdmap = data["osdmap"]["osdmap"]
+    osds_up = osdmap["num_up_osds"]
+    osds_in = osdmap["num_in_osds"]
+
+    warnings = data["health"].get("checks", {})
+
+    return {
+        "health": health,
+        "osds_up": osds_up,
+        "osds_in": osds_in,
+        "warnings": warnings
     }
+
+# =========================
+# PROMETHEUS METRICS
+# =========================
+
+def query_prometheus(query):
+    try:
+        r = requests.get(PROMETHEUS_URL, params={"query": query}, timeout=5)
+        r.raise_for_status()
+        return r.json()["data"]["result"]
+    except Exception:
+        return None
+
+def collect_metrics():
+    metrics = {}
+
+    metrics["osd_up"] = query_prometheus("ceph_osd_up")
+    metrics["pg_undersized"] = query_prometheus("ceph_pg_undersized")
+    metrics["pg_inactive"] = query_prometheus("ceph_pg_inactive")
+
     return metrics
 
 # =========================
-# GROQ RCA GENERATION
+# RCA CLASSIFICATION LOGIC
 # =========================
 
-def generate_rca_with_groq(metrics):
-    prompt = f"""
-You are a senior Ceph Storage SRE.
+def classify_issue(status, metrics):
+    health = status["health"]
+    osds_up = status["osds_up"]
+    osds_in = status["osds_in"]
 
-Generate a **DETAILED Root Cause Analysis (RCA)** with the following sections:
+    if health == "HEALTH_OK":
+        return "NO_RCA", "Cluster is healthy."
 
-1. Root Cause Analysis
-2. Impact
-3. Immediate Remediation (step-by-step commands)
-4. Long-term Preventive Actions
-5. Failure Prediction
-   - Risk Level
-   - Reasons
-   - Estimated Time to Impact
+    if health == "HEALTH_WARN":
+        if osds_up > 0 and osds_up == osds_in:
+            return "CONFIG_WARNING", "Cluster operational with configuration warnings."
+        else:
+            return "DEGRADED", "Partial OSD availability causing degradation."
 
-Ceph Metrics:
-- ceph_health_status: {metrics['ceph_health_status']}
-- osd_up: {metrics['osd_up']}
-- osd_in: {metrics['osd_in']}
-- pg_degraded: {metrics['pg_degraded']}
-- pg_undersized: {metrics['pg_undersized']}
-- mon_quorum: {metrics['mon_quorum']}
+    if health == "HEALTH_ERR":
+        return "CRITICAL_FAILURE", "Cluster in error state."
 
-Important rules:
-- Even ONE OSD down must be treated as HIGH RISK
-- Be explicit and professional
-- Suitable for senior management review
-"""
+    return "UNKNOWN", "Unable to classify cluster state."
 
+# =========================
+# GROQ RCA GENERATION (CONTROLLED)
+# =========================
+
+def generate_rca_with_groq(rca_type, status, metrics):
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
     }
 
+    prompt = f"""
+You are a senior Ceph SRE.
+
+STRICT RULES:
+- Do NOT invent outages
+- Do NOT claim data loss unless stated
+- If OSDs are UP, cluster is operational
+- HEALTH_WARN is NOT failure
+- Only explain the classified RCA
+
+RCA TYPE: {rca_type}
+
+CEPH STATUS:
+{json.dumps(status, indent=2)}
+
+PROMETHEUS METRICS:
+{json.dumps(metrics, indent=2)}
+
+Generate:
+1. Root Cause
+2. Impact
+3. Evidence
+4. Recommendation
+"""
+
     payload = {
-        "model": GROQ_MODEL,
-        "messages": [
-            {"role": "system", "content": "You generate enterprise-grade storage RCA reports."},
-            {"role": "user", "content": prompt}
-        ],
+        "model": MODEL,
+        "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.2
     }
 
-    r = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=30)
-    r.raise_for_status()
+    r = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=30
+    )
 
-    response = r.json()
+    data = r.json()
 
-    # ✅ Robust parsing (fixes 'choices' error)
-    return response.get("choices", [{}])[0].get("message", {}).get("content", "RCA generation failed.")
+    if "choices" not in data:
+        return "RCA generation failed: invalid LLM response."
+
+    return data["choices"][0]["message"]["content"]
 
 # =========================
-# PDF GENERATION
+# PDF REPORT
 # =========================
 
-def generate_pdf_report(rca_text):
+def generate_pdf_report(rca_text, rca_type):
     os.makedirs(REPORTS_DIR, exist_ok=True)
 
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-    pdf.set_font("Arial", size=10)
 
-    pdf.multi_cell(0, 8, rca_text)
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 10, "Ceph RCA Report", ln=True)
 
-    # ✅ Always overwrite
+    pdf.set_font("Arial", "", 10)
+    pdf.cell(0, 8, f"Generated: {datetime.now()}", ln=True)
+    pdf.cell(0, 8, f"RCA Type: {rca_type}", ln=True)
+    pdf.ln(5)
+
+    pdf.set_font("Arial", "", 11)
+    for line in rca_text.split("\n"):
+        pdf.multi_cell(0, 8, line)
+
     pdf.output(PDF_PATH)
-
-    print(f"✅ RCA PDF updated: {PDF_PATH}")
 
 # =========================
 # MAIN
 # =========================
 
 def main():
-    print("[1] Collecting Ceph metrics from Prometheus...")
-    metrics = collect_ceph_metrics()
+    print("[1] Checking Ceph status...")
+    status = get_ceph_status()
 
-    print("[2] Generating RCA using Groq AI...")
-    rca_text = generate_rca_with_groq(metrics)
+    if not status:
+        print("❌ Unable to fetch Ceph status.")
+        return
 
-    print("[3] Writing RCA PDF...")
-    generate_pdf_report(rca_text)
+    print("[2] Collecting Prometheus metrics...")
+    metrics = collect_metrics()
 
-    print("🎯 RCA generation completed successfully")
+    rca_type, decision = classify_issue(status, metrics)
+
+    print(f"[3] RCA Decision: {rca_type}")
+
+    if rca_type == "NO_RCA":
+        print("✅ Cluster healthy. No RCA generated.")
+        return
+
+    print("[4] Generating controlled RCA...")
+    rca_text = generate_rca_with_groq(rca_type, status, metrics)
+
+    print("[5] Writing PDF report...")
+    generate_pdf_report(rca_text, rca_type)
+
+    print(f"✅ RCA generated: {PDF_PATH}")
 
 if __name__ == "__main__":
     main()
