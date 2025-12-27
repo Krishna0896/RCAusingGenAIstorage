@@ -12,7 +12,7 @@ from fpdf import FPDF
 # ==============================
 
 PDF_PATH = "/home/RCAusingGenAIstorage/reports/Ceph_RCA_Report.pdf"
-GROQ_MODEL = "llama-3.1-70b-versatile"
+GROQ_MODEL = "llama-3.1-8b-instant"
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
