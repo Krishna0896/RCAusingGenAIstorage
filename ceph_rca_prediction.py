@@ -39,13 +39,13 @@ def get_ceph_status():
         return None
 
     data = json.loads(raw)
-    health = data["health"]["status"]
 
-    osdmap = data["osdmap"]["osdmap"]
-    osds_up = osdmap["num_up_osds"]
-    osds_in = osdmap["num_in_osds"]
+    health = data.get("health", {}).get("status", "UNKNOWN")
+    warnings = data.get("health", {}).get("checks", {})
 
-    warnings = data["health"].get("checks", {})
+    osd_info = data.get("osd", {})
+    osds_up = osd_info.get("num_up_osds", 0)
+    osds_in = osd_info.get("num_in_osds", 0)
 
     return {
         "health": health,
@@ -53,6 +53,7 @@ def get_ceph_status():
         "osds_in": osds_in,
         "warnings": warnings
     }
+
 
 
 # =========================
